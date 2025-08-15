@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
+#include "dbworker.h"
 
 #include <QLineEdit>
 #include <QPushButton>
@@ -8,6 +9,15 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QWidget>
+
+#include <QtSql/QSqlTableModel>
+#include <QtSql/QSqlQuery>
+#include <QtSql/QSqlError>
+#include <QDebug>
+#include <QHeaderView>
+#include <QMessageBox>
+
+static QSqlTableModel *g_model = nullptr;
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -62,9 +72,108 @@ MainWindow::MainWindow(QWidget *parent)
     mainV1Layout->addWidget(startBtn);
     mainV2Layout->addWidget(stopBtn);
 
+    dbworker = new DbWorker(this);
+
+    connect(startBtn, &QPushButton::clicked, this, &MainWindow::connectToBD);
+    connect(stopBtn, &QPushButton::clicked, this, &MainWindow::disconnectToBD);
+    connect(bdName, &QLineEdit::textChanged, this, &MainWindow::bdNameWrite);
+    connect(userName, &QLineEdit::textChanged, this, &MainWindow::userNameWrite);
+    connect(hostNum, &QLineEdit::textChanged, this, &MainWindow::hostNumWrite);
+    connect(portNum, &QLineEdit::textChanged, this, &MainWindow::portNumWrite);
+
+    connect(dbworker, &DbWorker::errorOccured, this, [this](const QString &err){
+        QMessageBox::warning(this, tr("Ошибка подключения к БД"), err);
+    });
+
+    tableBD->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableBD->setSelectionMode(QAbstractItemView::SingleSelection);
+    tableBD->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+}
+
+void MainWindow::bdNameWrite(const QString &text){
+    bdNameText = text;
+    dbworker->setBdName(text);
+}
+
+void MainWindow::userNameWrite(const QString &text){
+    userNameText = text;
+    dbworker->setUserName(text);
+}
+
+void MainWindow::hostNumWrite(const QString &text){
+    hostNumText = text;
+    dbworker->setHost(text);
+}
+
+void MainWindow::portNumWrite(const QString &text){
+    portNumText = text;
+    bool ok = false;
+    int p = text.toInt(&ok);
+    if (ok) {
+        dbworker->setPort(p);
+    } else {
+        dbworker->setPort(0);
+    }
+}
+
+void MainWindow::connectToBD()
+{
+    dbworker->connectToDb();
+    const QString connName = QStringLiteral("mydb_connection");
+    if (!QSqlDatabase::contains(connName)) {
+        QMessageBox::critical(this, tr("Ошибка"), tr("Подключение не создано: %1").arg(connName));
+        return;
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(connName);
+    if (!db.isValid() || !db.isOpen()) {
+        QMessageBox::critical(this, tr("Ошибка"), tr("Соединение с БД не открыто"));
+        return;
+    }
+
+    if (g_model) {
+        delete g_model;
+        g_model = nullptr;
+        tableBD->setModel(nullptr);
+    }
+
+    g_model = new QSqlTableModel(this, db);
+    g_model->setTable(QStringLiteral("WorkTableDataBase"));
+    g_model->setEditStrategy(QSqlTableModel::OnManualSubmit);
+
+    if (!g_model->select()) {
+        QString err = g_model->lastError().text();
+        delete g_model;
+        g_model = nullptr;
+        QMessageBox::critical(this, tr("Ошибка запроса"), err);
+        return;
+    }
+
+    tableBD->setModel(g_model);
+    tableBD->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    qDebug() << "Модель подключена к tableView";
+}
+
+void MainWindow::disconnectToBD()
+{
+    const QString connName = QStringLiteral("mydb_connection");
+
+    if (g_model) {
+        tableBD->setModel(nullptr);
+        delete g_model;
+        g_model = nullptr;
+    }
+
+    if (QSqlDatabase::contains(connName)) {
+        QSqlDatabase db = QSqlDatabase::database(connName);
+        if (db.isOpen()) db.close();
+        QSqlDatabase::removeDatabase(connName);
+    }
+    qDebug() << "Отключение от БД выполнено";
 }
 
 MainWindow::~MainWindow()
 {
+    disconnectToBD();
     delete ui;
 }
