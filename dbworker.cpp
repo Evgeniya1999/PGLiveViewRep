@@ -6,26 +6,42 @@
 #include <QtSql/QSqlQuery>
 #include <QtSql/QSqlError>
 #include <QtSql/QSqlRecord>
+#include <QtSql/QSqlDriver>
 #include <QDebug>
+#include <QUuid>
+#include <QMetaObject>
 
 DbWorker::DbWorker(MainWindow *mainwindow, QObject *parent)
     : QObject(parent),
     m_mainwindow(mainwindow),
-    dbworkerThread(new QThread)
+    m_thread(new QThread)
 {
-    this->moveToThread(dbworkerThread);
-    connect(dbworkerThread, &QThread::finished, this, &QObject::deleteLater);
+    this->moveToThread(m_thread);
+    connect(this, SIGNAL(stopThread()), this, SLOT(disconnect()), Qt::BlockingQueuedConnection);
+    connect(m_thread, &QThread::finished, this, &QObject::deleteLater);
 }
 
 DbWorker::~DbWorker()
 {
     stopThread();
-    if (dbworkerThread) {
-        delete dbworkerThread;
-        dbworkerThread = nullptr;
+    if (m_thread) {
+        if (m_thread->isRunning()) {
+            m_thread->quit();
+            m_thread->wait();
+        }
     }
 }
 
+void DbWorker::setTableName(const QString &tbname)
+{
+    m_tbName = tbname;
+    qDebug() << "DbWorker::setTableName =" << m_tbName;
+}
+void DbWorker::setPassword(const QString &pass)
+{
+    m_password = pass;
+    qDebug() << "DbWorker::setPassword =" << m_password;
+}
 void DbWorker::setBdName(const QString &name)
 {
     m_bdName = name;
@@ -54,136 +70,81 @@ QString DbWorker::bdName() const { return m_bdName; }
 QString DbWorker::userName() const { return m_userName; }
 QString DbWorker::host() const { return m_host; }
 int DbWorker::port() const { return m_port; }
+QString DbWorker::tableName() const {return m_tbName;}
+QString DbWorker::pass() const {return m_password;}
 
-// реализация с параметрами (соответствует объявлению в header)
-void DbWorker::insertElement(int id, const QString &name, int salary)
+void DbWorker::onDriverNotification(const QString &name,
+                                    QSqlDriver::NotificationSource /*src*/,
+                                    const QVariant &payload)
 {
-    const QString connectionName = QStringLiteral("mydb_connection");
-
-    if (!QSqlDatabase::contains(connectionName)) {
-        qWarning() << "insertElement: no such database connection:" << connectionName;
-        emit errorOccured("Нет соединения с БД");
-        return;
-    }
-    QSqlDatabase db = QSqlDatabase::database(connectionName);
-    if (!db.isValid() || !db.isOpen()) {
-        qWarning() << "insertElement: database is not open";
-        emit errorOccured("База данных не открыта");
-        return;
-    }
-
-    // начинаем транзакцию если поддерживается
-    if (!db.transaction()) {
-        qWarning() << "insertElement: cannot start transaction:" << db.lastError().text();
-        // не обязательно прекращать, можно продолжить без транзакции
-    }
-
-    QSqlQuery query(db);
-    query.prepare("INSERT INTO employee (id, name, salary) VALUES (:id, :name, :salary)");
-    query.bindValue(":id", id);
-    query.bindValue(":name", name);
-    query.bindValue(":salary", salary);
-    if (!query.exec()) {
-        qWarning() << "insertElement exec error:" << query.lastError().text();
-        db.rollback();
-        emit errorOccured(query.lastError().text());
-        return;
-    }
-    if (!db.commit()) {
-        qWarning() << "insertElement: commit failed:" << db.lastError().text();
-        emit errorOccured(db.lastError().text());
-    } else {
-        qDebug() << "insertElement: inserted" << id << name << salary;
-    }
+    qDebug() << "Получено уведомление от БД" << name << "Тип:" << payload.toString();
+    emit notificationReceived(name, payload);
 }
-
-void DbWorker::iterateElement()
-{
-    const QString connectionName = QStringLiteral("mydb_connection");
-    QSqlQuery query(QSqlDatabase::database(connectionName));
-    if (!query.exec("SELECT name, salary FROM employee")) {
-        qWarning() << "iterateElement exec error:" << query.lastError().text();
-        emit errorOccured(query.lastError().text());
-        return;
-    }
-
-    while (query.next()) {
-        QString name = query.value(0).toString();
-        int salary = query.value(1).toInt();
-        qDebug() << name << salary;
-    }
-}
-
-void DbWorker::followInstruct()
-{
-    const QString connectionName = QStringLiteral("mydb_connection");
-    if (!QSqlDatabase::contains(connectionName)) {
-        emit errorOccured(tr("Нет соединения с БД"));
-        return;
-    }
-
-    QSqlQuery query(QSqlDatabase::database(connectionName));
-    if (!query.exec("SELECT name, salary FROM employee WHERE salary > 50000")) {
-        qWarning() << "followInstruct error:" << query.lastError().text();
-        emit errorOccured(query.lastError().text());
-        return;
-    }
-
-    while (query.next()) {
-        const QString name = query.value(0).toString();
-        const int salary = query.value(1).toInt();
-        qDebug() << "followInstruct:" << name << salary;
-    }
-}
-
 void DbWorker::connectToDb()
 {
-    const QString connName = QStringLiteral("mydb_connection");
-
-    // Если такое соединение уже есть — удалим его
-    if (QSqlDatabase::contains(connName)) {
-        QSqlDatabase old = QSqlDatabase::database(connName);
-        if (old.isOpen())
-            old.close();
-        QSqlDatabase::removeDatabase(connName);
-    }
-
+    //создание подключения к бд с уникальным именем
+    m_connectionName = QStringLiteral("worker_conn_%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
     if (!QSqlDatabase::isDriverAvailable("QPSQL")) {
-        qWarning() << "QPSQL driver not available";
-        emit errorOccured(QStringLiteral("QPSQL driver not available"));
+        emit errorOccured("QPSQL driver not available");
+        m_connectionName.clear();
         return;
     }
-
-    QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QPSQL"), connName);
-    db.setHostName(m_host.isEmpty() ? QStringLiteral("bigblue") : m_host);
-    db.setPort(m_port > 0 ? m_port : 5432);
+    QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QPSQL"), m_connectionName);
+    db.setHostName(m_host.isEmpty() ? QStringLiteral("localhost") : m_host);
+    db.setPort(m_port);
     db.setDatabaseName(m_bdName.isEmpty() ? QStringLiteral("work_db") : m_bdName);
-    db.setUserName(m_userName.isEmpty() ? QStringLiteral("Evgeniya") : m_userName);
-    //db.setPassword(m_password);
-    db.setPassword("1234");
+    db.setUserName(m_userName.isEmpty() ? QStringLiteral("postgres") : m_userName);
+    db.setPassword(m_password);
 
     if (!db.open()) {
-        qWarning() << "DB open error:" << db.lastError().text();
         emit errorOccured(db.lastError().text());
-        db.close();
-        QSqlDatabase::removeDatabase(connName);
+        QSqlDatabase::removeDatabase(m_connectionName);
+        m_connectionName.clear();
         return;
     }
-
-    qDebug() << "DB connected (connectionName):" << db.connectionName();
+    //подписка на канал (название совпадает с тем, что отправляет NOTIFY)
+    const QString channel = QStringLiteral("insert_users_notf");
+    if (!db.driver()->subscribeToNotification(channel)) {
+        qWarning() << "подписка не удалась" << db.driver()->lastError().databaseText();
+    }
+    if (db.driver()) {
+        connect(db.driver(),
+                SIGNAL(notification(const QString&, QSqlDriver::NotificationSource, const QVariant&)),
+                this,
+                SLOT(onDriverNotification(const QString&, QSqlDriver::NotificationSource, const QVariant&)));
+    } else {
+        qWarning() << "Драйвер БД отсутствует!";
+    }
+    qDebug() << "Подключение рабочего потока к БД выполнено как: " << m_connectionName;
+}
+void DbWorker::disconnect()
+{
+    if (m_connectionName.isEmpty())
+        return;
+    if (QSqlDatabase::contains(m_connectionName)) {
+        {
+            QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+            if (db.isOpen())
+                db.close();
+        }
+        QSqlDatabase::removeDatabase(m_connectionName);
+        qDebug() << "Удалено подключение:" << m_connectionName;
+    }
+    m_connectionName.clear();
 }
 
 void DbWorker::startThread()
 {
-    if (dbworkerThread && !dbworkerThread->isRunning()) {
-        dbworkerThread->start();
+    if (m_thread && !m_thread->isRunning()) {
+        m_thread->start();
     }
 }
 
 void DbWorker::stopThread()
 {
-    if (dbworkerThread && dbworkerThread->isRunning()) {
-        dbworkerThread->quit();
-        dbworkerThread->wait();
+    if (m_thread && m_thread->isRunning()) {
+        QMetaObject::invokeMethod(this, "closeConnection", Qt::BlockingQueuedConnection);
+        m_thread->quit();
+        m_thread->wait();
     }
 }

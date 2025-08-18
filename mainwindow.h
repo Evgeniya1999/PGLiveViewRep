@@ -27,11 +27,14 @@ public:
     ~MainWindow();
 
 private slots:
+    void updateModel();
+
     void bdNameWrite(const QString &text);
     void userNameWrite(const QString &text);
     void hostNumWrite(const QString &text);
     void portNumWrite(const QString &text);
-    //void tableNameWrite(const QString &text);
+    void tableNameWrite(const QString &text);
+    void passwordWrite(const QString &text);
     void connectToBD();
     void disconnectToBD();
 private:
@@ -44,9 +47,11 @@ private:
     QLabel *hostNumLabel;
     QLineEdit *portNum;
     QLabel *portNumLabel;
+    QLineEdit *password;
+    QLabel *passwordLabel;
 
-    QLineEdit *tableNameEdit;
-    QLabel *tableName;
+    QLineEdit *tableName;
+    QLabel *tableNameLabel;
     QTableView *tableBD;
 
     QPushButton *startBtn;
@@ -65,6 +70,7 @@ private:
     QString hostNumText;
     QString portNumText;
     QString tableNameText;
+    QString passwordText;
 
     DbWorker *dbworker;
 };
